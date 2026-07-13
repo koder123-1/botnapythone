@@ -1,0 +1,14 @@
+# Создай .gitignore
+echo "__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.db
+*.sqlite3
+env/
+venv/
+.venv/
+.DS_Store
+*.log
+*.json" > .gitignore
