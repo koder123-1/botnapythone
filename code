@@ -1,0 +1,1113 @@
+import json
+import os
+import uuid
+import datetime
+import requests
+import threading
+import time
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import parse_qs, urlparse
+
+# ==================== НАСТРОЙКИ ====================
+# 👇 ТОЛЬКО ЭТИ ДВЕ ПЕРЕМЕННЫЕ НУЖНО ИЗМЕНИТЬ!
+BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # Токен твоего бота от @BotFather
+ADMIN_ID = 123456789  # Твой Telegram ID (узнай у @userinfobot)
+
+# Остальные настройки
+PORT = 8080
+
+# ==================== ДАННЫЕ ====================
+GOODS_FILE = 'goods.json'
+ORDERS_FILE = 'orders.json'
+USERS_FILE = 'users.json'
+TOKEN_ORDERS_FILE = 'token_orders.json'
+TOKEN_PACKS_FILE = 'token_packs.json'
+
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+# ==================== ИНИЦИАЛИЗАЦИЯ ====================
+def init_data():
+    if not os.path.exists(GOODS_FILE):
+        default_goods = {
+            "1": {
+                "name": "Курс по Python",
+                "description": "Полный курс по Python для начинающих",
+                "price_rub": 2990,
+                "price_tokens": 300,
+                "price_stars": 100,
+                "stock": 10,
+                "owner": "Алексей Иванов",
+                "owner_contact": "@alex_dev",
+                "download_link": "https://example.com/python_course.zip"
+            },
+            "2": {
+                "name": "Шаблон сайта",
+                "description": "Готовый HTML/CSS шаблон для бизнеса",
+                "price_rub": 1490,
+                "price_tokens": 150,
+                "price_stars": 50,
+                "stock": 5,
+                "owner": "Мария Петрова",
+                "owner_contact": "@maria_design",
+                "download_link": "https://example.com/template.zip"
+            },
+            "3": {
+                "name": "Гайд по маркетингу",
+                "description": "Стратегии продвижения в соцсетях",
+                "price_rub": 990,
+                "price_tokens": 100,
+                "price_stars": 35,
+                "stock": 8,
+                "owner": "Сергей Смирнов",
+                "owner_contact": "@sergey_marketing",
+                "download_link": "https://example.com/marketing_guide.pdf"
+            }
+        }
+        with open(GOODS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(default_goods, f, ensure_ascii=False, indent=4)
+    
+    if not os.path.exists(ORDERS_FILE):
+        with open(ORDERS_FILE, 'w', encoding='utf-8') as f:
+            json.dump({}, f, ensure_ascii=False, indent=4)
+    
+    if not os.path.exists(USERS_FILE):
+        with open(USERS_FILE, 'w', encoding='utf-8') as f:
+            json.dump({}, f, ensure_ascii=False, indent=4)
+    
+    if not os.path.exists(TOKEN_ORDERS_FILE):
+        with open(TOKEN_ORDERS_FILE, 'w', encoding='utf-8') as f:
+            json.dump({}, f, ensure_ascii=False, indent=4)
+    
+    if not os.path.exists(TOKEN_PACKS_FILE):
+        default_packs = [
+            {"id": "1", "tokens": 100, "price": 150, "bonus": 0},
+            {"id": "2", "tokens": 250, "price": 350, "bonus": 10},
+            {"id": "3", "tokens": 500, "price": 650, "bonus": 25},
+            {"id": "4", "tokens": 1000, "price": 1200, "bonus": 75},
+            {"id": "5", "tokens": 2500, "price": 2750, "bonus": 250},
+            {"id": "6", "tokens": 5000, "price": 5000, "bonus": 750}
+        ]
+        with open(TOKEN_PACKS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(default_packs, f, ensure_ascii=False, indent=4)
+
+def load_data(filename):
+    with open(filename, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+def save_data(filename, data):
+    with open(filename, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+def is_admin(chat_id):
+    return str(chat_id) == str(ADMIN_ID)
+
+# ==================== TELEGRAM БОТ ====================
+def send_message(chat_id, text, keyboard=None):
+    url = f"{TELEGRAM_API}/sendMessage"
+    payload = {
+        'chat_id': chat_id,
+        'text': text,
+        'parse_mode': 'HTML'
+    }
+    if keyboard:
+        payload['reply_markup'] = json.dumps({'inline_keyboard': keyboard})
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        print(f"Send error: {e}")
+
+def edit_message(chat_id, message_id, text, keyboard=None):
+    url = f"{TELEGRAM_API}/editMessageText"
+    payload = {
+        'chat_id': chat_id,
+        'message_id': message_id,
+        'text': text,
+        'parse_mode': 'HTML'
+    }
+    if keyboard:
+        payload['reply_markup'] = json.dumps({'inline_keyboard': keyboard})
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        print(f"Edit error: {e}")
+
+def answer_callback(callback_id, text, show_alert=False):
+    url = f"{TELEGRAM_API}/answerCallbackQuery"
+    payload = {
+        'callback_query_id': callback_id,
+        'text': text,
+        'show_alert': show_alert
+    }
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        print(f"Callback error: {e}")
+
+def delete_message(chat_id, message_id):
+    url = f"{TELEGRAM_API}/deleteMessage"
+    payload = {
+        'chat_id': chat_id,
+        'message_id': message_id
+    }
+    try:
+        requests.post(url, json=payload)
+    except:
+        pass
+
+# ==================== ОСНОВНОЕ МЕНЮ ====================
+def show_main_menu(chat_id, message_id=None):
+    users = load_data(USERS_FILE)
+    
+    # Регистрируем пользователя, если его нет
+    if str(chat_id) not in users:
+        users[str(chat_id)] = {
+            'name': f"User_{chat_id}",
+            'role': 'user',
+            'balance_tokens': 0,
+            'balance_stars': 0
+        }
+        save_data(USERS_FILE, users)
+    
+    text = """🤖 <b>Добро пожаловать в Маркетплейс!</b>
+
+Выберите действие:"""
+    
+    keyboard = [
+        [{"text": "📚 Каталог товаров", "callback_data": "catalog"}],
+        [{"text": "💰 Мой баланс", "callback_data": "balance"}],
+        [{"text": "📦 Мои заказы", "callback_data": "my_orders"}],
+        [{"text": "🪙 Купить токены", "callback_data": "tokens"}]
+    ]
+    
+    if is_admin(chat_id):
+        keyboard.append([{"text": "⚙️ Админ-панель", "callback_data": "admin_panel"}])
+    
+    if message_id:
+        edit_message(chat_id, message_id, text, keyboard)
+    else:
+        send_message(chat_id, text, keyboard)
+
+# ==================== КАТАЛОГ ====================
+def show_catalog(chat_id, message_id=None):
+    goods = load_data(GOODS_FILE)
+    available = {k: v for k, v in goods.items() if v.get('stock', 0) > 0}
+    
+    if not available:
+        text = "📭 <b>Нет доступных товаров</b>"
+        keyboard = [[{"text": "🔙 Главное меню", "callback_data": "main"}]]
+        if message_id:
+            edit_message(chat_id, message_id, text, keyboard)
+        else:
+            send_message(chat_id, text, keyboard)
+        return
+    
+    # Показываем список товаров с кнопками
+    text = "📚 <b>Выберите товар:</b>\n\n"
+    keyboard = []
+    
+    for good_id, good in available.items():
+        text += f"<b>{good_id}. {good['name']}</b>\n"
+        text += f"💰 ₽{good['price_rub']} | 🪙{good['price_tokens']} | ⭐{good['price_stars']}\n"
+        text += f"📦 {good['stock']} шт. | 👤 {good['owner']}\n\n"
+        
+        keyboard.append([
+            {"text": f"🛒 Купить #{good_id}", "callback_data": f"buy_{good_id}"}
+        ])
+    
+    keyboard.append([{"text": "🔙 Главное меню", "callback_data": "main"}])
+    
+    if message_id:
+        edit_message(chat_id, message_id, text, keyboard)
+    else:
+        send_message(chat_id, text, keyboard)
+
+# ==================== ПОКУПКА ====================
+def show_buy_options(chat_id, good_id, message_id=None):
+    goods = load_data(GOODS_FILE)
+    good = goods.get(good_id)
+    
+    if not good or good.get('stock', 0) <= 0:
+        text = "❌ Товар недоступен"
+        keyboard = [[{"text": "🔙 Каталог", "callback_data": "catalog"}]]
+        if message_id:
+            edit_message(chat_id, message_id, text, keyboard)
+        else:
+            send_message(chat_id, text, keyboard)
+        return
+    
+    text = f"""🛒 <b>{good['name']}</b>
+
+📝 {good['description']}
+👤 Владелец: {good['owner']}
+📱 Контакты: {good['owner_contact']}
+
+💰 <b>Выберите валюту для оплаты:</b>
+• ₽ {good['price_rub']}
+• 🪙 {good['price_tokens']} токенов
+• ⭐ {good['price_stars']} звёзд"""
+    
+    keyboard = [
+        [
+            {"text": f"₽ {good['price_rub']}", "callback_data": f"pay_{good_id}_rub"},
+            {"text": f"🪙 {good['price_tokens']}", "callback_data": f"pay_{good_id}_tokens"},
+            {"text": f"⭐ {good['price_stars']}", "callback_data": f"pay_{good_id}_stars"}
+        ],
+        [{"text": "🔙 Каталог", "callback_data": "catalog"}]
+    ]
+    
+    if message_id:
+        edit_message(chat_id, message_id, text, keyboard)
+    else:
+        send_message(chat_id, text, keyboard)
+
+def process_payment(chat_id, good_id, currency, message_id=None):
+    goods = load_data(GOODS_FILE)
+    good = goods.get(good_id)
+    
+    if not good or good.get('stock', 0) <= 0:
+        text = "❌ Товар недоступен"
+        keyboard = [[{"text": "🔙 Каталог", "callback_data": "catalog"}]]
+        if message_id:
+            edit_message(chat_id, message_id, text, keyboard)
+        else:
+            send_message(chat_id, text, keyboard)
+        return
+    
+    users = load_data(USERS_FILE)
+    user = users.get(str(chat_id))
+    
+    if not user:
+        text = "❌ Вы не зарегистрированы!"
+        if message_id:
+            edit_message(chat_id, message_id, text, [[{"text": "🔙 Главное меню", "callback_data": "main"}]])
+        else:
+            send_message(chat_id, text)
+        return
+    
+    price_key = f'price_{currency}'
+    balance_key = f'balance_{currency}'
+    price = good.get(price_key, 0)
+    
+    if user.get(balance_key, 0) < price:
+        text = f"""❌ <b>Недостаточно средств!</b>
+
+Ваш баланс: {user.get(balance_key, 0)} {currency}
+Нужно: {price} {currency}
+
+🪙 Купите токены в магазине!"""
+        keyboard = [
+            [{"text": "🪙 Купить токены", "callback_data": "tokens"}],
+            [{"text": "🔙 Каталог", "callback_data": "catalog"}]
+        ]
+        if message_id:
+            edit_message(chat_id, message_id, text, keyboard)
+        else:
+            send_message(chat_id, text, keyboard)
+        return
+    
+    # Списываем средства
+    user[balance_key] -= price
+    save_data(USERS_FILE, users)
+    
+    # Уменьшаем количество товара
+    goods[good_id]['stock'] -= 1
+    save_data(GOODS_FILE, goods)
+    
+    # Создаем заказ
+    orders = load_data(ORDERS_FILE)
+    order_id = str(uuid.uuid4())
+    access_key = str(uuid.uuid4())[:8].upper()
+    
+    orders[order_id] = {
+        'good_id': good_id,
+        'good_name': good['name'],
+        'price': price,
+        'currency': currency,
+        'buyer_id': str(chat_id),
+        'buyer_name': user.get('name', 'Пользователь'),
+        'owner': good['owner'],
+        'owner_contact': good['owner_contact'],
+        'download_link': good['download_link'],
+        'access_key': access_key,
+        'date': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'status': 'pending'
+    }
+    save_data(ORDERS_FILE, orders)
+    
+    text = f"""✅ <b>Заказ создан!</b>
+
+📦 {good['name']}
+💰 {price} {currency}
+👤 Владелец: {good['owner']}
+📱 Контакты: {good['owner_contact']}
+
+⏳ Ожидайте подтверждения от владельца!
+
+🔑 Ключ доступа будет выдан после подтверждения."""
+    
+    keyboard = [
+        [{"text": "📦 Мои заказы", "callback_data": "my_orders"}],
+        [{"text": "🔙 Каталог", "callback_data": "catalog"}]
+    ]
+    
+    if message_id:
+        edit_message(chat_id, message_id, text, keyboard)
+    else:
+        send_message(chat_id, text, keyboard)
+    
+    # Уведомление админу
+    if not is_admin(chat_id):
+        admin_text = f"""🆕 <b>Новый заказ!</b>
+
+👤 Покупатель: {user.get('name', 'Неизвестно')}
+📦 Товар: {good['name']}
+💰 Цена: {price} {currency}
+📅 Дата: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}
+
+Используйте админ-панель для управления."""
+        send_message(ADMIN_ID, admin_text)
+
+# ==================== БАЛАНС ====================
+def show_balance(chat_id, message_id=None):
+    users = load_data(USERS_FILE)
+    user = users.get(str(chat_id))
+    
+    if not user:
+        text = "❌ Вы не зарегистрированы!"
+        keyboard = [[{"text": "🔙 Главное меню", "callback_data": "main"}]]
+        if message_id:
+            edit_message(chat_id, message_id, text, keyboard)
+        else:
+            send_message(chat_id, text, keyboard)
+        return
+    
+    text = f"""💰 <b>Ваш баланс</b>
+
+👤 {user.get('name', 'Пользователь')}
+🪙 Токены: {user.get('balance_tokens', 0)}
+⭐ Звёзды: {user.get('balance_stars', 0)}"""
+    
+    keyboard = [
+        [{"text": "🪙 Купить токены", "callback_data": "tokens"}],
+        [{"text": "🔙 Главное меню", "callback_data": "main"}]
+    ]
+    
+    if message_id:
+        edit_message(chat_id, message_id, text, keyboard)
+    else:
+        send_message(chat_id, text, keyboard)
+
+# ==================== МОИ ЗАКАЗЫ ====================
+def show_my_orders(chat_id, message_id=None):
+    orders = load_data(ORDERS_FILE)
+    user_orders = {k: v for k, v in orders.items() if v.get('buyer_id') == str(chat_id)}
+    
+    if not user_orders:
+        text = "📭 <b>У вас нет заказов</b>"
+        keyboard = [[{"text": "🔙 Главное меню", "callback_data": "main"}]]
+        if message_id:
+            edit_message(chat_id, message_id, text, keyboard)
+        else:
+            send_message(chat_id, text, keyboard)
+        return
+    
+    text = "📦 <b>Ваши заказы:</b>\n\n"
+    
+    for order_id, order in list(user_orders.items())[::-1][:10]:  # Последние 10
+        status_emoji = {
+            'pending': '⏳',
+            'approved': '✅',
+            'rejected': '❌'
+        }.get(order.get('status', 'pending'), '❓')
+        
+        status_text = {
+            'pending': 'Ожидает подтверждения',
+            'approved': 'Подтверждён ✅',
+            'rejected': 'Отклонён ❌'
+        }.get(order.get('status', 'pending'), 'Неизвестно')
+        
+        text += f"{status_emoji} <b>{order['good_name']}</b>\n"
+        text += f"💰 {order['price']} {order.get('currency', '₽')}\n"
+        text += f"📅 {order['date']}\n"
+        text += f"📌 {status_text}\n"
+        
+        if order.get('status') == 'approved':
+            text += f"🔑 Ключ: <code>{order['access_key']}</code>\n"
+            text += f"📥 <a href='{order['download_link']}'>Скачать</a>\n"
+        
+        text += "\n"
+    
+    keyboard = [[{"text": "🔙 Главное меню", "callback_data": "main"}]]
+    
+    if message_id:
+        edit_message(chat_id, message_id, text, keyboard)
+    else:
+        send_message(chat_id, text, keyboard)
+
+# ==================== МАГАЗИН ТОКЕНОВ ====================
+def show_tokens(chat_id, message_id=None):
+    packs = load_data(TOKEN_PACKS_FILE)
+    
+    text = "🪙 <b>Магазин токенов</b>\n\nВыберите пакет:"
+    keyboard = []
+    
+    for pack in packs:
+        total = pack['tokens'] + pack.get('bonus', 0)
+        bonus_text = f" (+{pack['bonus']} бонус)" if pack.get('bonus', 0) > 0 else ""
+        keyboard.append([
+            {"text": f"🪙 {pack['tokens']}{bonus_text} - {pack['price']}₽", 
+             "callback_data": f"buy_tokens_{pack['id']}"}
+        ])
+    
+    keyboard.append([{"text": "🔙 Главное меню", "callback_data": "main"}])
+    
+    if message_id:
+        edit_message(chat_id, message_id, text, keyboard)
+    else:
+        send_message(chat_id, text, keyboard)
+
+def process_buy_tokens(chat_id, pack_id, message_id=None):
+    packs = load_data(TOKEN_PACKS_FILE)
+    pack = next((p for p in packs if p['id'] == pack_id), None)
+    
+    if not pack:
+        text = "❌ Пакет не найден"
+        keyboard = [[{"text": "🔙 Магазин токенов", "callback_data": "tokens"}]]
+        if message_id:
+            edit_message(chat_id, message_id, text, keyboard)
+        else:
+            send_message(chat_id, text, keyboard)
+        return
+    
+    users = load_data(USERS_FILE)
+    user = users.get(str(chat_id))
+    
+    if not user:
+        text = "❌ Вы не зарегистрированы!"
+        keyboard = [[{"text": "🔙 Главное меню", "callback_data": "main"}]]
+        if message_id:
+            edit_message(chat_id, message_id, text, keyboard)
+        else:
+            send_message(chat_id, text, keyboard)
+        return
+    
+    token_orders = load_data(TOKEN_ORDERS_FILE)
+    order_id = str(uuid.uuid4())
+    
+    token_orders[order_id] = {
+        'buyer_id': str(chat_id),
+        'buyer_name': user.get('name', 'Пользователь'),
+        'tokens': pack['tokens'],
+        'bonus': pack.get('bonus', 0),
+        'price': pack['price'],
+        'date': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'status': 'pending'
+    }
+    save_data(TOKEN_ORDERS_FILE, token_orders)
+    
+    text = f"""✅ <b>Заказ токенов создан!</b>
+
+🪙 Токенов: {pack['tokens']}
+🎁 Бонус: +{pack.get('bonus', 0)}
+📦 Итого: {pack['tokens'] + pack.get('bonus', 0)}
+💰 Цена: {pack['price']}₽
+
+⏳ Ожидайте подтверждения от администратора!"""
+    
+    keyboard = [
+        [{"text": "📦 Мои заказы", "callback_data": "my_orders"}],
+        [{"text": "🔙 Магазин токенов", "callback_data": "tokens"}]
+    ]
+    
+    if message_id:
+        edit_message(chat_id, message_id, text, keyboard)
+    else:
+        send_message(chat_id, text, keyboard)
+    
+    # Уведомление админу
+    if not is_admin(chat_id):
+        admin_text = f"""🆕 <b>Новый заказ токенов!</b>
+
+👤 Покупатель: {user.get('name', 'Неизвестно')}
+🪙 Токенов: {pack['tokens']}
+💰 Цена: {pack['price']}₽
+📅 Дата: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}
+
+Используйте админ-панель для подтверждения."""
+        send_message(ADMIN_ID, admin_text)
+
+# ==================== АДМИН-ПАНЕЛЬ ====================
+def show_admin_panel(chat_id, message_id=None):
+    if not is_admin(chat_id):
+        text = "⛔ Доступ запрещён!"
+        if message_id:
+            edit_message(chat_id, message_id, text, [[{"text": "🔙 Главное меню", "callback_data": "main"}]])
+        else:
+            send_message(chat_id, text)
+        return
+    
+    text = """⚙️ <b>Админ-панель</b>
+
+Выберите действие:"""
+    
+    keyboard = [
+        [{"text": "📚 Все товары", "callback_data": "admin_goods"}],
+        [{"text": "📊 Все заказы", "callback_data": "admin_orders"}],
+        [{"text": "🪙 Заказы токенов", "callback_data": "admin_token_orders"}],
+        [{"text": "➕ Добавить товар", "callback_data": "admin_add_good"}],
+        [{"text": "🔙 Главное меню", "callback_data": "main"}]
+    ]
+    
+    if message_id:
+        edit_message(chat_id, message_id, text, keyboard)
+    else:
+        send_message(chat_id, text, keyboard)
+
+def show_admin_goods(chat_id, message_id=None):
+    if not is_admin(chat_id):
+        return
+    
+    goods = load_data(GOODS_FILE)
+    
+    if not goods:
+        text = "📭 <b>Товаров нет</b>"
+        keyboard = [[{"text": "🔙 Админ-панель", "callback_data": "admin_panel"}]]
+        if message_id:
+            edit_message(chat_id, message_id, text, keyboard)
+        else:
+            send_message(chat_id, text, keyboard)
+        return
+    
+    text = "📚 <b>Все товары:</b>\n\n"
+    keyboard = []
+    
+    for good_id, good in goods.items():
+        text += f"<b>#{good_id}. {good['name']}</b>\n"
+        text += f"📦 {good['stock']} шт. | 💰 ₽{good['price_rub']} | 🪙{good['price_tokens']} | ⭐{good['price_stars']}\n"
+        text += f"👤 {good['owner']}\n\n"
+        
+        keyboard.append([
+            {"text": f"✏️ Ред. #{good_id}", "callback_data": f"admin_edit_good_{good_id}"},
+            {"text": f"🗑️ Уд. #{good_id}", "callback_data": f"admin_delete_good_{good_id}"}
+        ])
+    
+    keyboard.append([{"text": "🔙 Админ-панель", "callback_data": "admin_panel"}])
+    
+    if message_id:
+        edit_message(chat_id, message_id, text, keyboard)
+    else:
+        send_message(chat_id, text, keyboard)
+
+def show_admin_orders(chat_id, message_id=None):
+    if not is_admin(chat_id):
+        return
+    
+    orders = load_data(ORDERS_FILE)
+    
+    if not orders:
+        text = "📭 <b>Заказов нет</b>"
+        keyboard = [[{"text": "🔙 Админ-панель", "callback_data": "admin_panel"}]]
+        if message_id:
+            edit_message(chat_id, message_id, text, keyboard)
+        else:
+            send_message(chat_id, text, keyboard)
+        return
+    
+    text = "📊 <b>Все заказы:</b>\n\n"
+    keyboard = []
+    
+    for order_id, order in list(orders.items())[::-1][:10]:
+        status_emoji = {
+            'pending': '⏳',
+            'approved': '✅',
+            'rejected': '❌'
+        }.get(order.get('status', 'pending'), '❓')
+        
+        status_text = {
+            'pending': 'Ожидает',
+            'approved': 'Подтверждён ✅',
+            'rejected': 'Отклонён ❌'
+        }.get(order.get('status', 'pending'), 'Неизвестно')
+        
+        text += f"{status_emoji} <b>{order['good_name']}</b>\n"
+        text += f"👤 {order.get('buyer_name', 'Неизвестно')}\n"
+        text += f"💰 {order['price']} {order.get('currency', '₽')}\n"
+        text += f"📌 {status_text}\n"
+        text += f"📅 {order['date']}\n\n"
+        
+        if order.get('status') == 'pending':
+            keyboard.append([
+                {"text": f"✅ Подтв. {order_id[:8]}", "callback_data": f"admin_approve_{order_id}"},
+                {"text": f"❌ Откл. {order_id[:8]}", "callback_data": f"admin_reject_{order_id}"}
+            ])
+    
+    keyboard.append([{"text": "🔙 Админ-панель", "callback_data": "admin_panel"}])
+    
+    if message_id:
+        edit_message(chat_id, message_id, text, keyboard)
+    else:
+        send_message(chat_id, text, keyboard)
+
+def show_admin_token_orders(chat_id, message_id=None):
+    if not is_admin(chat_id):
+        return
+    
+    token_orders = load_data(TOKEN_ORDERS_FILE)
+    
+    if not token_orders:
+        text = "📭 <b>Заказов токенов нет</b>"
+        keyboard = [[{"text": "🔙 Админ-панель", "callback_data": "admin_panel"}]]
+        if message_id:
+            edit_message(chat_id, message_id, text, keyboard)
+        else:
+            send_message(chat_id, text, keyboard)
+        return
+    
+    text = "🪙 <b>Заказы токенов:</b>\n\n"
+    keyboard = []
+    
+    for order_id, order in list(token_orders.items())[::-1][:10]:
+        status_emoji = {
+            'pending': '⏳',
+            'approved': '✅',
+            'rejected': '❌'
+        }.get(order.get('status', 'pending'), '❓')
+        
+        status_text = {
+            'pending': 'Ожидает',
+            'approved': 'Подтверждён ✅',
+            'rejected': 'Отклонён ❌'
+        }.get(order.get('status', 'pending'), 'Неизвестно')
+        
+        text += f"{status_emoji} <b>Заказ #{order_id[:8]}</b>\n"
+        text += f"👤 {order.get('buyer_name', 'Неизвестно')}\n"
+        text += f"🪙 {order['tokens']} токенов (+{order.get('bonus', 0)} бонус)\n"
+        text += f"💰 {order['price']}₽\n"
+        text += f"📌 {status_text}\n"
+        text += f"📅 {order['date']}\n\n"
+        
+        if order.get('status') == 'pending':
+            keyboard.append([
+                {"text": f"✅ Подтв. {order_id[:8]}", "callback_data": f"admin_approve_token_{order_id}"},
+                {"text": f"❌ Откл. {order_id[:8]}", "callback_data": f"admin_reject_token_{order_id}"}
+            ])
+    
+    keyboard.append([{"text": "🔙 Админ-панель", "callback_data": "admin_panel"}])
+    
+    if message_id:
+        edit_message(chat_id, message_id, text, keyboard)
+    else:
+        send_message(chat_id, text, keyboard)
+
+def show_add_good(chat_id, message_id=None):
+    if not is_admin(chat_id):
+        return
+    
+    text = """➕ <b>Добавление товара</b>
+
+Отправьте данные в формате:
+
+<code>Название
+Описание
+Цена_руб
+Цена_токены
+Цена_звёзды
+Количество
+Имя_владельца
+Контакты_владельца
+Ссылка_для_скачивания</code>
+
+Пример:
+<code>Курс по Python
+Полный курс для начинающих
+2990
+300
+100
+10
+Алексей Иванов
+@alex_dev
+https://example.com/course.zip</code>"""
+    
+    keyboard = [[{"text": "🔙 Админ-панель", "callback_data": "admin_panel"}]]
+    
+    if message_id:
+        edit_message(chat_id, message_id, text, keyboard)
+    else:
+        send_message(chat_id, text, keyboard)
+
+def process_add_good(chat_id, text):
+    if not is_admin(chat_id):
+        return
+    
+    lines = text.strip().split('\n')
+    if len(lines) < 9:
+        send_message(chat_id, "❌ Неверный формат! Нужно 9 строк.")
+        return
+    
+    try:
+        name = lines[0].strip()
+        description = lines[1].strip()
+        price_rub = int(lines[2].strip())
+        price_tokens = int(lines[3].strip())
+        price_stars = int(lines[4].strip())
+        stock = int(lines[5].strip())
+        owner = lines[6].strip()
+        owner_contact = lines[7].strip()
+        download_link = lines[8].strip()
+        
+        goods = load_data(GOODS_FILE)
+        new_id = str(max([int(k) for k in goods.keys()] + [0]) + 1)
+        
+        goods[new_id] = {
+            'name': name,
+            'description': description,
+            'price_rub': price_rub,
+            'price_tokens': price_tokens,
+            'price_stars': price_stars,
+            'stock': stock,
+            'owner': owner,
+            'owner_contact': owner_contact,
+            'download_link': download_link
+        }
+        save_data(GOODS_FILE, goods)
+        
+        send_message(chat_id, f"✅ Товар добавлен! ID: {new_id}")
+    except Exception as e:
+        send_message(chat_id, f"❌ Ошибка: {str(e)}")
+
+# ==================== ОБРАБОТКА КОМАНД ====================
+def handle_command(chat_id, text):
+    if text == '/start':
+        show_main_menu(chat_id)
+        return
+    
+    # Добавление товара через текст (для админа)
+    if is_admin(chat_id) and len(text.split('\n')) >= 9:
+        # Проверяем, что это не просто текст
+        lines = text.strip().split('\n')
+        try:
+            int(lines[2].strip())
+            int(lines[3].strip())
+            int(lines[4].strip())
+            int(lines[5].strip())
+            process_add_good(chat_id, text)
+            return
+        except:
+            pass
+    
+    # Если неизвестная команда
+    send_message(chat_id, "❌ Неизвестная команда. Используйте кнопки меню.")
+
+# ==================== ОБРАБОТКА КНОПОК ====================
+def handle_callback(callback):
+    chat_id = callback['from']['id']
+    message_id = callback['message']['message_id']
+    data = callback['data']
+    
+    answer_callback(callback['id'], "✅")
+    
+    # ---- ОСНОВНЫЕ КНОПКИ ----
+    if data == 'main':
+        show_main_menu(chat_id, message_id)
+    
+    elif data == 'catalog':
+        show_catalog(chat_id, message_id)
+    
+    elif data == 'balance':
+        show_balance(chat_id, message_id)
+    
+    elif data == 'my_orders':
+        show_my_orders(chat_id, message_id)
+    
+    elif data == 'tokens':
+        show_tokens(chat_id, message_id)
+    
+    # ---- ПОКУПКА ТОВАРА ----
+    elif data.startswith('buy_'):
+        good_id = data.split('_')[1]
+        show_buy_options(chat_id, good_id, message_id)
+    
+    elif data.startswith('pay_'):
+        parts = data.split('_')
+        good_id = parts[1]
+        currency = parts[2]
+        process_payment(chat_id, good_id, currency, message_id)
+    
+    # ---- ПОКУПКА ТОКЕНОВ ----
+    elif data.startswith('buy_tokens_'):
+        pack_id = data.split('_')[2]
+        process_buy_tokens(chat_id, pack_id, message_id)
+    
+    # ---- АДМИН-ПАНЕЛЬ ----
+    elif data == 'admin_panel':
+        show_admin_panel(chat_id, message_id)
+    
+    elif data == 'admin_goods':
+        show_admin_goods(chat_id, message_id)
+    
+    elif data == 'admin_orders':
+        show_admin_orders(chat_id, message_id)
+    
+    elif data == 'admin_token_orders':
+        show_admin_token_orders(chat_id, message_id)
+    
+    elif data == 'admin_add_good':
+        show_add_good(chat_id, message_id)
+    
+    # ---- УПРАВЛЕНИЕ ТОВАРАМИ ----
+    elif data.startswith('admin_delete_good_'):
+        good_id = data.split('_')[3]
+        if is_admin(chat_id):
+            goods = load_data(GOODS_FILE)
+            if good_id in goods:
+                del goods[good_id]
+                save_data(GOODS_FILE, goods)
+                send_message(chat_id, f"✅ Товар #{good_id} удалён!")
+                show_admin_goods(chat_id, message_id)
+    
+    elif data.startswith('admin_edit_good_'):
+        # Просто показываем инструкцию
+        if is_admin(chat_id):
+            good_id = data.split('_')[3]
+            goods = load_data(GOODS_FILE)
+            good = goods.get(good_id)
+            if good:
+                text = f"""✏️ <b>Редактирование товара #{good_id}</b>
+
+Отправьте новые данные в том же формате, что и при создании:
+
+<code>Название
+Описание
+Цена_руб
+Цена_токены
+Цена_звёзды
+Количество
+Имя_владельца
+Контакты_владельца
+Ссылка_для_скачивания</code>
+
+Текущие данные:
+<code>{good['name']}
+{good['description']}
+{good['price_rub']}
+{good['price_tokens']}
+{good['price_stars']}
+{good['stock']}
+{good['owner']}
+{good['owner_contact']}
+{good['download_link']}</code>"""
+                
+                keyboard = [[{"text": "🔙 Назад", "callback_data": "admin_goods"}]]
+                edit_message(chat_id, message_id, text, keyboard)
+                
+                # Сохраняем ID товара для редактирования
+                return
+    
+    # ---- ПОДТВЕРЖДЕНИЕ ЗАКАЗОВ ----
+    elif data.startswith('admin_approve_'):
+        if not is_admin(chat_id):
+            return
+        order_id = data.split('_')[2]
+        orders = load_data(ORDERS_FILE)
+        if order_id in orders:
+            orders[order_id]['status'] = 'approved'
+            save_data(ORDERS_FILE, orders)
+            
+            # Уведомляем покупателя
+            buyer_id = orders[order_id]['buyer_id']
+            good_name = orders[order_id]['good_name']
+            access_key = orders[order_id]['access_key']
+            download_link = orders[order_id]['download_link']
+            
+            send_message(buyer_id, f"""✅ <b>Заказ подтверждён!</b>
+
+📦 {good_name}
+🔑 Ключ доступа: <code>{access_key}</code>
+📥 <a href='{download_link}'>Скачать товар</a>
+
+Спасибо за покупку!""")
+            
+            send_message(chat_id, f"✅ Заказ #{order_id[:8]} подтверждён!")
+            show_admin_orders(chat_id, message_id)
+    
+    elif data.startswith('admin_reject_'):
+        if not is_admin(chat_id):
+            return
+        order_id = data.split('_')[2]
+        orders = load_data(ORDERS_FILE)
+        if order_id in orders:
+            order = orders[order_id]
+            order['status'] = 'rejected'
+            
+            # Возвращаем средства
+            users = load_data(USERS_FILE)
+            buyer_id = order['buyer_id']
+            if buyer_id in users:
+                balance_key = f'balance_{order.get("currency", "rub")}'
+                if balance_key in users[buyer_id]:
+                    users[buyer_id][balance_key] += order['price']
+                    save_data(USERS_FILE, users)
+            
+            save_data(ORDERS_FILE, orders)
+            
+            # Уведомляем покупателя
+            send_message(buyer_id, f"""❌ <b>Заказ отклонён!</b>
+
+📦 {order['good_name']}
+💰 {order['price']} {order.get('currency', '₽')} возвращены на баланс.
+
+Причина: Администратор отклонил заказ.""")
+            
+            send_message(chat_id, f"❌ Заказ #{order_id[:8]} отклонён!")
+            show_admin_orders(chat_id, message_id)
+    
+    # ---- ПОДТВЕРЖДЕНИЕ ЗАКАЗОВ ТОКЕНОВ ----
+    elif data.startswith('admin_approve_token_'):
+        if not is_admin(chat_id):
+            return
+        order_id = data.split('_')[3]
+        token_orders = load_data(TOKEN_ORDERS_FILE)
+        if order_id in token_orders:
+            order = token_orders[order_id]
+            order['status'] = 'approved'
+            
+            # Начисляем токены
+            users = load_data(USERS_FILE)
+            buyer_id = order['buyer_id']
+            if buyer_id in users:
+                total = order['tokens'] + order.get('bonus', 0)
+                users[buyer_id]['balance_tokens'] += total
+                save_data(USERS_FILE, users)
+            
+            save_data(TOKEN_ORDERS_FILE, token_orders)
+            
+            # Уведомляем покупателя
+            send_message(buyer_id, f"""✅ <b>Заказ токенов подтверждён!</b>
+
+🪙 Начислено: {order['tokens']} токенов
+🎁 Бонус: +{order.get('bonus', 0)}
+📦 Итого: {order['tokens'] + order.get('bonus', 0)}
+
+Проверьте свой баланс!""")
+            
+            send_message(chat_id, f"✅ Заказ токенов #{order_id[:8]} подтверждён!")
+            show_admin_token_orders(chat_id, message_id)
+    
+    elif data.startswith('admin_reject_token_'):
+        if not is_admin(chat_id):
+            return
+        order_id = data.split('_')[3]
+        token_orders = load_data(TOKEN_ORDERS_FILE)
+        if order_id in token_orders:
+            token_orders[order_id]['status'] = 'rejected'
+            save_data(TOKEN_ORDERS_FILE, token_orders)
+            
+            send_message(chat_id, f"❌ Заказ токенов #{order_id[:8]} отклонён!")
+            show_admin_token_orders(chat_id, message_id)
+
+# ==================== ПОЛЛИНГ ====================
+def bot_polling():
+    offset = 0
+    while True:
+        try:
+            url = f"{TELEGRAM_API}/getUpdates"
+            params = {'offset': offset, 'timeout': 30}
+            response = requests.get(url, params=params, timeout=35)
+            
+            if response.status_code != 200:
+                time.sleep(5)
+                continue
+            
+            updates = response.json().get('result', [])
+            
+            for update in updates:
+                offset = update['update_id'] + 1
+                
+                # Обработка команды
+                if 'message' in update:
+                    message = update['message']
+                    chat_id = message['chat']['id']
+                    
+                    if 'text' in message:
+                        text = message['text']
+                        if text.startswith('/'):
+                            handle_command(chat_id, text)
+                        else:
+                            # Если это текст и админ - пробуем добавить товар
+                            if is_admin(chat_id) and len(text.strip().split('\n')) >= 9:
+                                process_add_good(chat_id, text)
+                            else:
+                                send_message(chat_id, "❌ Используйте кнопки меню!")
+                
+                # Обработка нажатия кнопки
+                elif 'callback_query' in update:
+                    handle_callback(update['callback_query'])
+            
+        except Exception as e:
+            print(f"Polling error: {e}")
+            time.sleep(5)
+
+# ==================== HTTP СЕРВЕР (для вебхука, опционально) ====================
+class WebhookHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        post_data = self.rfile.read(content_length)
+        
+        try:
+            update = json.loads(post_data)
+            if 'callback_query' in update:
+                handle_callback(update['callback_query'])
+            elif 'message' in update:
+                message = update['message']
+                chat_id = message['chat']['id']
+                if 'text' in message:
+                    text = message['text']
+                    if text.startswith('/'):
+                        handle_command(chat_id, text)
+                    else:
+                        if is_admin(chat_id) and len(text.strip().split('\n')) >= 9:
+                            process_add_good(chat_id, text)
+                        else:
+                            send_message(chat_id, "❌ Используйте кнопки меню!")
+        except:
+            pass
+        
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'OK')
+    
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'Bot is running!')
+
+# ==================== ЗАПУСК ====================
+def main():
+    init_data()
+    
+    print('🚀 Маркетплейс бот запущен!')
+    print(f'🤖 Бот: https://t.me/{"YOUR_BOT_USERNAME"}')
+    print(f'👑 Admin ID: {ADMIN_ID}')
+    print('')
+    print('📌 ВСЁ УПРАВЛЕНИЕ ЧЕРЕЗ КНОПКИ В TELEGRAM!')
+    print('   - Нажми /start для запуска')
+    print('   - Используй кнопки в меню')
+    print('')
+    print('🔄 Режим: Поллинг (не нужен вебхук)')
+    print('Нажмите CTRL+C для остановки')
+    
+    # Запускаем поллинг в отдельном потоке
+    bot_thread = threading.Thread(target=bot_polling, daemon=True)
+    bot_thread.start()
+    
+    # Запускаем HTTP сервер (для вебхука, если понадобится)
+    try:
+        server = HTTPServer(('', PORT), WebhookHandler)
+        print(f'🌐 HTTP сервер запущен на порту {PORT}')
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print('\n👋 Сервер остановлен')
+        server.shutdown()
+
+if __name__ == '__main__':
+    main()
